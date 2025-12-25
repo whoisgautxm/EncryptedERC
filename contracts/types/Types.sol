@@ -95,3 +95,15 @@ struct Metadata {
     string messageType;
     bytes encryptedMsg;
 }
+
+
+struct Offer{
+    address initiator;
+    address acceptor;
+    address assetBuy;
+    address assetSell;
+    uint256 rate;
+    uint256 maxAmountToSell;
+    bytes amountToBuyEncryptionData;
+    bytes amountToBuyCommitmentData;
+}
