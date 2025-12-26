@@ -1,0 +1,395 @@
+import type { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
+import { expect } from "chai";
+import { ethers, zkit } from "hardhat";
+import type {
+    ConfidentialApproveCircuit,
+    ConfidentialTransferFromCircuit,
+    CancelAllowanceCircuit,
+    CalldataConfidentialApproveCircuitGroth16,
+    CalldataConfidentialTransferFromCircuitGroth16,
+    CalldataCancelAllowanceCircuitGroth16,
+} from "../generated-types/zkit";
+import { processPoseidonEncryption } from "../src";
+import { encryptMessage } from "../src/jub/jub";
+import type { ZexERC } from "../typechain-types/contracts/ZexERC";
+import type { Registrar } from "../typechain-types/contracts/Registrar";
+import {
+    ZexERC__factory,
+    Registrar__factory,
+} from "../typechain-types/factories/contracts";
+import {
+    ConfidentialApproveCircuitGroth16Verifier__factory,
+    ConfidentialTransferFromCircuitGroth16Verifier__factory,
+    CancelAllowanceCircuitGroth16Verifier__factory,
+} from "../typechain-types/factories/contracts/verifiers";
+import {
+    deployLibrary,
+    deployVerifiers,
+    getDecryptedBalance,
+    privateMint,
+} from "./helpers";
+import { User } from "./user";
+
+const DECIMALS = 2;
+
+describe("ZexERC - Confidential Allowance", () => {
+    let registrar: Registrar;
+    let zexERC: ZexERC;
+    let users: User[];
+    let signers: SignerWithAddress[];
+    let owner: SignerWithAddress;
+    let auditorPublicKey: [bigint, bigint];
+
+    // Circuit instances
+    let confidentialApproveCircuit: ConfidentialApproveCircuit;
+    let confidentialTransferFromCircuit: ConfidentialTransferFromCircuit;
+    let cancelAllowanceCircuit: CancelAllowanceCircuit;
+
+    const deployFixture = async () => {
+        signers = await ethers.getSigners();
+        owner = signers[0];
+
+        // Deploy base verifiers
+        const baseVerifiers = await deployVerifiers(owner, false);
+        const babyJubJub = await deployLibrary(owner);
+
+        // Deploy Registrar
+        const registrarFactory = new Registrar__factory(owner);
+        const registrar_ = await registrarFactory.connect(owner).deploy(baseVerifiers.registrationVerifier);
+        await registrar_.waitForDeployment();
+
+        // Deploy ZEX-specific verifiers
+        const confidentialApproveVerifier = await new ConfidentialApproveCircuitGroth16Verifier__factory(owner).deploy();
+        await confidentialApproveVerifier.waitForDeployment();
+
+        const confidentialTransferFromVerifier = await new ConfidentialTransferFromCircuitGroth16Verifier__factory(owner).deploy();
+        await confidentialTransferFromVerifier.waitForDeployment();
+
+        const cancelAllowanceVerifier = await new CancelAllowanceCircuitGroth16Verifier__factory(owner).deploy();
+        await cancelAllowanceVerifier.waitForDeployment();
+
+        // Deploy ZexERC
+        const zexERCFactory = new ZexERC__factory({
+            "contracts/libraries/BabyJubJub.sol:BabyJubJub": babyJubJub,
+        }, owner);
+
+        const zexERC_ = await zexERCFactory.connect(owner).deploy({
+            baseParams: {
+                registrar: registrar_.target,
+                isConverter: false,
+                name: "ZEX Test Token",
+                symbol: "ZEXT",
+                mintVerifier: baseVerifiers.mintVerifier,
+                withdrawVerifier: baseVerifiers.withdrawVerifier,
+                transferVerifier: baseVerifiers.transferVerifier,
+                burnVerifier: baseVerifiers.burnVerifier,
+                decimals: DECIMALS,
+            },
+            confidentialApproveVerifier: confidentialApproveVerifier.target,
+            confidentialTransferFromVerifier: confidentialTransferFromVerifier.target,
+            cancelAllowanceVerifier: cancelAllowanceVerifier.target,
+        });
+
+        await zexERC_.waitForDeployment();
+
+        registrar = registrar_;
+        zexERC = zexERC_;
+        users = signers.map((signer) => new User(signer));
+
+        // Get circuit instances
+        confidentialApproveCircuit = await zkit.getCircuit("ConfidentialApproveCircuit") as unknown as ConfidentialApproveCircuit;
+        confidentialTransferFromCircuit = await zkit.getCircuit("ConfidentialTransferFromCircuit") as unknown as ConfidentialTransferFromCircuit;
+        cancelAllowanceCircuit = await zkit.getCircuit("CancelAllowanceCircuit") as unknown as CancelAllowanceCircuit;
+    };
+
+    before(async () => {
+        await deployFixture();
+    });
+
+    describe("Setup", () => {
+        it("should deploy ZexERC properly", async () => {
+            expect(zexERC.target).to.not.be.null;
+            expect(await zexERC.name()).to.equal("ZEX Test Token");
+            expect(await zexERC.symbol()).to.equal("ZEXT");
+        });
+
+        it("should register users", async () => {
+            const chainId = await ethers.provider.getNetwork().then((n) => n.chainId);
+            const registrationCircuit = await zkit.getCircuit("RegistrationCircuit");
+
+            // Register first 4 users
+            for (const user of users.slice(0, 4)) {
+                const registrationHash = user.genRegistrationHash(chainId);
+                const input = {
+                    SenderPrivateKey: user.formattedPrivateKey,
+                    SenderPublicKey: user.publicKey,
+                    SenderAddress: BigInt(user.signer.address),
+                    ChainID: chainId,
+                    RegistrationHash: registrationHash,
+                };
+
+                const proof = await registrationCircuit.generateProof(input);
+                const calldata = await registrationCircuit.generateCalldata(proof);
+
+                await registrar.connect(user.signer).register({
+                    proofPoints: calldata.proofPoints,
+                    publicSignals: calldata.publicSignals,
+                });
+
+                expect(await registrar.isUserRegistered(user.signer.address)).to.be.true;
+            }
+        });
+
+        it("should set auditor public key", async () => {
+            await zexERC.connect(owner).setAuditorPublicKey(owner.address);
+            expect(await zexERC.isAuditorKeySet()).to.be.true;
+            auditorPublicKey = [users[0].publicKey[0], users[0].publicKey[1]];
+        });
+
+        it("should mint tokens to approver (user1)", async () => {
+            const approver = users[1];
+            const mintAmount = 10000n;
+
+            const calldata = await privateMint(mintAmount, approver.publicKey, auditorPublicKey);
+
+            await zexERC.connect(owner)[
+                "privateMint(address,((uint256[2],uint256[2][2],uint256[2]),uint256[24]))"
+            ](approver.signer.address, {
+                proofPoints: calldata.proofPoints,
+                publicSignals: calldata.publicSignals,
+            });
+
+            const balance = await zexERC.balanceOfStandalone(approver.signer.address);
+            const decryptedBalance = await getDecryptedBalance(
+                approver.privateKey,
+                balance.amountPCTs,
+                balance.balancePCT,
+                balance.eGCT,
+            );
+
+            expect(decryptedBalance).to.equal(mintAmount);
+        });
+    });
+
+    describe("Confidential Approve Circuit", () => {
+        it("should generate valid proof for confidential approval", async () => {
+            const approver = users[1];
+            const spender = users[2];
+            const approvalAmount = 500n;
+
+            // Get approver's current balance
+            const balance = await zexERC.balanceOfStandalone(approver.signer.address);
+            const approverBalance = await getDecryptedBalance(
+                approver.privateKey,
+                balance.amountPCTs,
+                balance.balancePCT,
+                balance.eGCT,
+            );
+
+            // Encrypt the approval amount for spender (ElGamal)
+            const { cipher: encryptedAllowance, random: allowanceRandom } =
+                encryptMessage(spender.publicKey, approvalAmount);
+
+            // Create PCT for spender
+            const {
+                ciphertext: spenderCiphertext,
+                nonce: spenderNonce,
+                authKey: spenderAuthKey,
+                encRandom: spenderEncRandom,
+            } = processPoseidonEncryption([approvalAmount], spender.publicKey);
+
+            // Create PCT for auditor
+            const {
+                ciphertext: auditorCiphertext,
+                nonce: auditorNonce,
+                authKey: auditorAuthKey,
+                encRandom: auditorEncRandom,
+            } = processPoseidonEncryption([approvalAmount], auditorPublicKey);
+
+            const input = {
+                ApprovalAmount: approvalAmount,
+                SenderPrivateKey: approver.formattedPrivateKey,
+                SenderBalance: approverBalance,
+                AllowanceRandom: allowanceRandom,
+                SpenderPCTRandom: spenderEncRandom,
+                AuditorPCTRandom: auditorEncRandom,
+                SenderPublicKey: approver.publicKey,
+                SpenderPublicKey: spender.publicKey,
+                OperatorPublicKey: spender.publicKey,
+                SenderBalanceC1: [balance.eGCT.c1.x, balance.eGCT.c1.y],
+                SenderBalanceC2: [balance.eGCT.c2.x, balance.eGCT.c2.y],
+                AllowanceC1: encryptedAllowance[0],
+                AllowanceC2: encryptedAllowance[1],
+                SpenderPCT: spenderCiphertext,
+                SpenderPCTAuthKey: spenderAuthKey,
+                SpenderPCTNonce: spenderNonce,
+                AuditorPublicKey: auditorPublicKey,
+                AuditorPCT: auditorCiphertext,
+                AuditorPCTAuthKey: auditorAuthKey,
+                AuditorPCTNonce: auditorNonce,
+            };
+
+            // Generate proof
+            const proof = await confidentialApproveCircuit.generateProof(input);
+
+            // Verify the proof locally
+            await expect(confidentialApproveCircuit).to.verifyProof(proof);
+
+            console.log("✓ Confidential Approve proof generated and verified locally");
+        });
+    });
+
+    describe("Confidential TransferFrom Circuit", () => {
+        it("should generate valid proof for confidential transferFrom", async () => {
+            const spender = users[2];
+            const approverPublicKey = users[1].publicKey;
+            const receiverPublicKey = spender.publicKey; // Spender receives
+            const allowanceAmount = 500n;
+            const transferAmount = 200n;
+            const remainingAllowance = allowanceAmount - transferAmount;
+
+            // Encrypt allowance for spender (simulating existing allowance)
+            const { cipher: encryptedAllowance, random: allowanceRandom } =
+                encryptMessage(spender.publicKey, allowanceAmount);
+
+            // Encrypt new allowance (remaining)
+            const { cipher: newAllowanceEncrypted, random: newAllowanceRandom } =
+                encryptMessage(spender.publicKey, remainingAllowance);
+
+            // Encrypt transfer amount for receiver
+            const { cipher: receiverEncrypted, random: receiverRandom } =
+                encryptMessage(receiverPublicKey, transferAmount);
+
+            // Create PCT for receiver
+            const {
+                ciphertext: receiverCiphertext,
+                nonce: receiverNonce,
+                authKey: receiverAuthKey,
+                encRandom: receiverEncRandom,
+            } = processPoseidonEncryption([transferAmount], receiverPublicKey);
+
+            // Create PCT for auditor
+            const {
+                ciphertext: auditorCiphertext,
+                nonce: auditorNonce,
+                authKey: auditorAuthKey,
+                encRandom: auditorEncRandom,
+            } = processPoseidonEncryption([transferAmount], auditorPublicKey);
+
+            const input = {
+                SpenderPrivateKey: spender.formattedPrivateKey,
+                TransferAmount: transferAmount,
+                AllowanceAmount: allowanceAmount,
+                ReceiverRandom: receiverRandom,
+                NewAllowanceRandom: newAllowanceRandom,
+                ReceiverPCTRandom: receiverEncRandom,
+                AuditorPCTRandom: auditorEncRandom,
+                ApproverPublicKey: approverPublicKey,
+                SpenderPublicKey: spender.publicKey,
+                ReceiverPublicKey: receiverPublicKey,
+                AllowanceC1: encryptedAllowance[0],
+                AllowanceC2: encryptedAllowance[1],
+                NewAllowanceC1: newAllowanceEncrypted[0],
+                NewAllowanceC2: newAllowanceEncrypted[1],
+                ReceiverAmountC1: receiverEncrypted[0],
+                ReceiverAmountC2: receiverEncrypted[1],
+                ReceiverPCT: receiverCiphertext,
+                ReceiverPCTAuthKey: receiverAuthKey,
+                ReceiverPCTNonce: receiverNonce,
+                AuditorPublicKey: auditorPublicKey,
+                AuditorPCT: auditorCiphertext,
+                AuditorPCTAuthKey: auditorAuthKey,
+                AuditorPCTNonce: auditorNonce,
+            };
+
+            // Generate proof
+            const proof = await confidentialTransferFromCircuit.generateProof(input);
+
+            // Verify the proof locally
+            await expect(confidentialTransferFromCircuit).to.verifyProof(proof);
+
+            console.log("✓ Confidential TransferFrom proof generated and verified locally");
+        });
+    });
+
+    describe("Cancel Allowance Circuit", () => {
+        it("should generate valid proof for cancel allowance", async () => {
+            const approver = users[1];
+            const spenderPublicKey = users[2].publicKey;
+            const allowanceAmount = 500n;
+
+            // Simulate existing allowance
+            const { cipher: encryptedAllowance } =
+                encryptMessage(spenderPublicKey, allowanceAmount);
+
+            const input = {
+                ApproverPrivateKey: approver.formattedPrivateKey,
+                AllowanceAmount: allowanceAmount,
+                ApproverPublicKey: approver.publicKey,
+                SpenderPublicKey: spenderPublicKey,
+                AllowanceC1: encryptedAllowance[0],
+                AllowanceC2: encryptedAllowance[1],
+            };
+
+            // Generate proof
+            const proof = await cancelAllowanceCircuit.generateProof(input);
+
+            // Verify the proof locally
+            await expect(cancelAllowanceCircuit).to.verifyProof(proof);
+
+            console.log("✓ Cancel Allowance proof generated and verified locally");
+        });
+    });
+
+    describe("Swap Marketplace", () => {
+        it("should create an offer", async () => {
+            const initiator = users[1];
+
+            const tx = await zexERC.connect(initiator.signer).initiateOffer(
+                ethers.ZeroAddress, // assetBuy
+                ethers.ZeroAddress, // assetSell (this contract)
+                ethers.parseEther("1"), // rate
+                1000n, // maxAmountToSell
+                "0x", // approveData
+            );
+
+            await tx.wait();
+
+            const offer = await zexERC.getOffer(0);
+            expect(offer.initiator).to.equal(initiator.signer.address);
+            expect(offer.rate).to.equal(ethers.parseEther("1"));
+            expect(offer.maxAmountToSell).to.equal(1000n);
+        });
+
+        it("should accept an offer", async () => {
+            const acceptor = users[2];
+
+            const tx = await zexERC.connect(acceptor.signer).acceptOffer(
+                0, // offerId
+                "0x", // approveData
+                "0x", // proofData
+            );
+
+            await tx.wait();
+
+            const offer = await zexERC.getOffer(0);
+            expect(offer.acceptor).to.equal(acceptor.signer.address);
+        });
+
+        it("should finalize a swap", async () => {
+            const initiator = users[1];
+
+            const tx = await zexERC.connect(initiator.signer).finalizeSwap(
+                0, // offerId
+                "0x", // transferFromData
+                "0x", // proofData
+            );
+
+            await tx.wait();
+
+            // Offer should be deleted after finalization
+            const offer = await zexERC.getOffer(0);
+            expect(offer.initiator).to.equal(ethers.ZeroAddress);
+        });
+    });
+});

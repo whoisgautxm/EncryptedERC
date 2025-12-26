@@ -18,12 +18,14 @@ const config: HardhatUserConfig = {
     settings: {
       optimizer: {
         enabled: true,
-        runs: 200,
+        runs: 10,  // Reduced for smaller bytecode size
       },
+      viaIR: true,
     },
   },
   networks: {
     hardhat: {
+      allowUnlimitedContractSize: true,  // Allow large contracts for testing
       forking: {
         url: RPC_URL,
         blockNumber: 59121339,
