@@ -2,7 +2,7 @@
 // See the file LICENSE for licensing terms.
 
 // SPDX-License-Identifier: Ecosystem
-pragma solidity 0.8.27;
+pragma solidity ^0.8.27;
 
 import {EncryptedERC} from "./EncryptedERC.sol";
 import {BabyJubJub} from "./libraries/BabyJubJub.sol";
@@ -15,6 +15,8 @@ import {
     ConfidentialApproveProof,
     ConfidentialTransferFromProof,
     CancelAllowanceProof,
+    OfferAcceptanceProof,
+    OfferFinalizationProof,
     Offer,
     AmountPCT
 } from "./types/Types.sol";
@@ -23,6 +25,8 @@ import {IConfidentialTransferFromVerifier} from "./interfaces/verifiers/IConfide
 import {ICancelAllowanceVerifier} from "./interfaces/verifiers/ICancelAllowanceVerifier.sol";
 import {IRegistrar} from "./interfaces/IRegistrar.sol";
 import {IZexERC} from "./interfaces/IZexERC.sol";
+import {IOfferAcceptanceVerifier} from "./interfaces/verifiers/IOfferAcceptanceVerifier.sol";
+import {IOfferFinalizationVerifier} from "./interfaces/verifiers/IOfferFinalizationVerifier.sol";
 import {UserNotRegistered, InvalidProof, ZeroAddress} from "./errors/Errors.sol";
 
 /**
@@ -49,6 +53,8 @@ contract ZexERC is EncryptedERC {
     IConfidentialApproveVerifier public confidentialApproveVerifier;
     IConfidentialTransferFromVerifier public confidentialTransferFromVerifier;
     ICancelAllowanceVerifier public cancelAllowanceVerifier;
+    IOfferAcceptanceVerifier public offerAcceptanceVerifier;
+    IOfferFinalizationVerifier public offerFinalizationVerifier;
     
     /// @notice Swap marketplace: offerId => Offer
     mapping(uint256 => Offer) public offers;
@@ -128,7 +134,9 @@ contract ZexERC is EncryptedERC {
         if (
             params.confidentialApproveVerifier == address(0) ||
             params.confidentialTransferFromVerifier == address(0) ||
-            params.cancelAllowanceVerifier == address(0)
+            params.cancelAllowanceVerifier == address(0) ||
+            params.offerAcceptanceVerifier == address(0) ||
+            params.offerFinalizationVerifier == address(0)
         ) {
             revert ZeroAddress();
         }
@@ -136,6 +144,8 @@ contract ZexERC is EncryptedERC {
         confidentialApproveVerifier = IConfidentialApproveVerifier(params.confidentialApproveVerifier);
         confidentialTransferFromVerifier = IConfidentialTransferFromVerifier(params.confidentialTransferFromVerifier);
         cancelAllowanceVerifier = ICancelAllowanceVerifier(params.cancelAllowanceVerifier);
+        offerAcceptanceVerifier = IOfferAcceptanceVerifier(params.offerAcceptanceVerifier);
+        offerFinalizationVerifier = IOfferFinalizationVerifier(params.offerFinalizationVerifier);
     }
     
     ///////////////////////////////////////////////////
@@ -593,7 +603,7 @@ contract ZexERC is EncryptedERC {
      * @param offerId ID of the offer to accept
      * @param approveData Approval data for buy asset (acceptor approves initiator)
      *        Format: (bytes amountEncryptionData, bytes amountCommitmentData, bytes proofData)
-     * @param proofData Additional proof data for the swap
+     * @param proofData ZK proof proving chosen amount ≤ maxAmountToSell (§5.2.1)
      */
     function acceptOffer(
         uint256 offerId,
@@ -605,8 +615,58 @@ contract ZexERC is EncryptedERC {
         if (offer.acceptor != address(0)) revert OfferAlreadyAccepted();
         if (!registrar.isUserRegistered(msg.sender)) revert UserNotRegistered();
         
+        // Decode and verify offer acceptance proof
+        OfferAcceptanceProof memory proof = abi.decode(proofData, (OfferAcceptanceProof));
+        
+        // Validate acceptor's public key matches proof [0-1]
+        uint256[2] memory acceptorPK = registrar.getUserPublicKey(msg.sender);
+        require(
+            proof.publicSignals[0] == acceptorPK[0] &&
+            proof.publicSignals[1] == acceptorPK[1],
+            "ZexERC: invalid acceptor PK"
+        );
+        
+        // Validate initiator's public key matches proof [2-3]
+        uint256[2] memory initiatorPK = registrar.getUserPublicKey(offer.initiator);
+        require(
+            proof.publicSignals[2] == initiatorPK[0] &&
+            proof.publicSignals[3] == initiatorPK[1],
+            "ZexERC: invalid initiator PK"
+        );
+        
+        // Validate maxAmountToSell matches offer [4]
+        require(
+            proof.publicSignals[4] == offer.maxAmountToSell,
+            "ZexERC: max amount mismatch"
+        );
+        
+        // Validate rate matches offer [5]
+        require(
+            proof.publicSignals[5] == offer.rate,
+            "ZexERC: rate mismatch"
+        );
+        
+        // Verify the ZK proof
+        bool isVerified = offerAcceptanceVerifier.verifyProof(
+            proof.proofPoints.a,
+            proof.proofPoints.b,
+            proof.proofPoints.c,
+            proof.publicSignals
+        );
+        if (!isVerified) revert InvalidProof();
+        
+        // Store acceptor and commitment data
         offer.acceptor = msg.sender;
         offer.amountToBuyCommitmentData = approveData;
+        
+        // Store the encrypted amount commitment from the proof [6-9] for finalization
+        // This is the commitment the initiator will decrypt
+        offer.amountToBuyEncryptionData = abi.encode(
+            proof.publicSignals[6],  // AmountToBuyC1.x
+            proof.publicSignals[7],  // AmountToBuyC1.y
+            proof.publicSignals[8],  // AmountToBuyC2.x
+            proof.publicSignals[9]   // AmountToBuyC2.y
+        );
         
         emit OfferAccepted(offerId, msg.sender);
     }
@@ -617,12 +677,13 @@ contract ZexERC is EncryptedERC {
      * @param transferFromData Encoded data for executing the transfers
      *        Format: (bytes initiatorTransferData, bytes acceptorTransferData)
      *        Each contains: (bytes amountEncryptionData, bytes amountCommitmentData, bytes proofData)
-     * @param proofData Additional proof data for finalization
+     * @param proofData ZK proof proving correct decryption and sell amount computation (§5.2.2)
      * 
      * @dev Swap flow:
      *      1. Initiator approved acceptor for assetSell during initiateOffer
      *      2. Acceptor approved initiator for assetBuy during acceptOffer  
      *      3. Now we execute:
+     *         - Verify finalization proof
      *         - Acceptor transfers assetSell from initiator to themselves
      *         - Initiator transfers assetBuy from acceptor to themselves
      */
@@ -636,6 +697,55 @@ contract ZexERC is EncryptedERC {
         if (offer.acceptor == address(0)) revert OfferNotAccepted();
         if (msg.sender != offer.initiator && msg.sender != offer.acceptor) {
             revert NotOfferParticipant();
+        }
+        
+        // Verify finalization proof if provided
+        if (proofData.length > 0) {
+            OfferFinalizationProof memory proof = abi.decode(proofData, (OfferFinalizationProof));
+            
+            // Validate initiator's public key matches proof [0-1]
+            uint256[2] memory initiatorPK = registrar.getUserPublicKey(offer.initiator);
+            require(
+                proof.publicSignals[0] == initiatorPK[0] &&
+                proof.publicSignals[1] == initiatorPK[1],
+                "ZexERC: invalid initiator PK"
+            );
+            
+            // Validate acceptor's public key matches proof [2-3]
+            uint256[2] memory acceptorPK = registrar.getUserPublicKey(offer.acceptor);
+            require(
+                proof.publicSignals[2] == acceptorPK[0] &&
+                proof.publicSignals[3] == acceptorPK[1],
+                "ZexERC: invalid acceptor PK"
+            );
+            
+            // Validate rate matches offer [4]
+            require(
+                proof.publicSignals[4] == offer.rate,
+                "ZexERC: rate mismatch"
+            );
+            
+            // Validate AmountToBuy commitment matches stored commitment [5-8]
+            (uint256 c1x, uint256 c1y, uint256 c2x, uint256 c2y) = abi.decode(
+                offer.amountToBuyEncryptionData, 
+                (uint256, uint256, uint256, uint256)
+            );
+            require(
+                proof.publicSignals[5] == c1x &&
+                proof.publicSignals[6] == c1y &&
+                proof.publicSignals[7] == c2x &&
+                proof.publicSignals[8] == c2y,
+                "ZexERC: commitment mismatch"
+            );
+            
+            // Verify the ZK proof
+            bool isVerified = offerFinalizationVerifier.verifyProof(
+                proof.proofPoints.a,
+                proof.proofPoints.b,
+                proof.proofPoints.c,
+                proof.publicSignals
+            );
+            if (!isVerified) revert InvalidProof();
         }
         
         // Delete offer first to prevent reentrancy

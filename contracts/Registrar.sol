@@ -3,7 +3,7 @@
 
 // SPDX-License-Identifier: Ecosystem
 
-pragma solidity 0.8.27;
+pragma solidity ^0.8.27;
 
 import {Point, RegisterProof} from "./types/Types.sol";
 import {IRegistrationVerifier} from "./interfaces/verifiers/IRegistrationVerifier.sol";

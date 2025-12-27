@@ -3,7 +3,7 @@
 
 // SPDX-License-Identifier: Ecosystem
 
-pragma solidity 0.8.27;
+pragma solidity ^0.8.27;
 
 import {EncryptedBalance, EGCT, BalanceHistory, AmountPCT} from "./types/Types.sol";
 import {InvalidProof} from "./errors/Errors.sol";

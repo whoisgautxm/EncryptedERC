@@ -166,10 +166,36 @@ struct CancelAllowanceProof {
     uint256[8] publicSignals;   // [approverPK(2), spenderPK(2), allowanceC1(2), allowanceC2(2)]
 }
 
+/// @notice Proof for offer acceptance (§5.2.1)
+/// Public signals order (14 total):
+///   [0-1]   AcceptorPublicKey
+///   [2-3]   InitiatorPublicKey
+///   [4]     MaxAmountToSell
+///   [5]     Rate
+///   [6-9]   AmountToBuyC1, AmountToBuyC2
+struct OfferAcceptanceProof {
+    ProofPoints proofPoints;
+    uint256[14] publicSignals;
+}
+
+/// @notice Proof for offer finalization (§5.2.2)
+/// Public signals order (17 total):
+///   [0-1]   InitiatorPublicKey
+///   [2-3]   AcceptorPublicKey
+///   [4]     Rate
+///   [5-8]   AmountToBuyC1, AmountToBuyC2
+///   [9-12]  SellAmountC1, SellAmountC2
+struct OfferFinalizationProof {
+    ProofPoints proofPoints;
+    uint256[17] publicSignals;
+}
+
 /// @notice Parameters for creating a ZexERC contract
 struct CreateZexERCParams {
     CreateEncryptedERCParams baseParams;
     address confidentialApproveVerifier;
     address confidentialTransferFromVerifier;
     address cancelAllowanceVerifier;
+    address offerAcceptanceVerifier;
+    address offerFinalizationVerifier;
 }

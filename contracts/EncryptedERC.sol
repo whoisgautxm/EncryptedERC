@@ -2,7 +2,7 @@
 // See the file LICENSE for licensing terms.
 
 // SPDX-License-Identifier: Ecosystem
-pragma solidity 0.8.27;
+pragma solidity ^0.8.27;
 
 // contracts
 import {TokenTracker} from "./tokens/TokenTracker.sol";
@@ -816,7 +816,7 @@ contract EncryptedERC is
         // Extract auditor PCT and emit event
         {
             uint256[7] memory auditorPCT;
-            for (uint256 i = 0; i < 7; i++) {
+            for (uint256 i = 0; i < 7; ++i) {
                 auditorPCT[i] = publicInputs[25 + i];
             }
 
@@ -913,7 +913,7 @@ contract EncryptedERC is
 
             // Extract amount PCT
             uint256[7] memory amountPCT;
-            for (uint256 i = 0; i < 7; i++) {
+            for (uint256 i = 0; i < 7; ++i) {
                 amountPCT[i] = publicInputs[8 + i];
             }
 
@@ -925,7 +925,7 @@ contract EncryptedERC is
         alreadyMinted[mintNullifier] = true;
 
         uint256[7] memory auditorPCT;
-        for (uint256 i = 0; i < auditorPCT.length; i++) {
+        for (uint256 i = 0; i < auditorPCT.length; ++i) {
             auditorPCT[i] = publicInputs[17 + i];
         }
 
@@ -983,7 +983,7 @@ contract EncryptedERC is
 
         // extract auditor PCT
         uint256[7] memory auditorPCT;
-        for (uint256 i = 0; i < auditorPCT.length; i++) {
+        for (uint256 i = 0; i < auditorPCT.length; ++i) {
             auditorPCT[i] = publicInputs[12 + i];
         }
 
@@ -1072,7 +1072,7 @@ contract EncryptedERC is
         // Extract auditor PCT and emit event
         {
             uint256[7] memory auditorPCT;
-            for (uint256 i = 0; i < 7; i++) {
+            for (uint256 i = 0; i < 7; ++i) {
                 auditorPCT[i] = publicInputs[9 + i];
             }
 
@@ -1147,7 +1147,7 @@ contract EncryptedERC is
             c2: Point({x: input[14], y: input[15]})
         });
 
-        for (uint256 i = 0; i < 7; i++) {
+        for (uint256 i = 0; i < 7; ++i) {
             transferInputs.amountPCT[i] = input[16 + i];
         }
     }
