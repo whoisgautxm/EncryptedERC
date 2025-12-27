@@ -5,9 +5,13 @@ import type {
     ConfidentialApproveCircuit,
     ConfidentialTransferFromCircuit,
     CancelAllowanceCircuit,
+    OfferAcceptanceCircuit,
+    OfferFinalizationCircuit,
     CalldataConfidentialApproveCircuitGroth16,
     CalldataConfidentialTransferFromCircuitGroth16,
     CalldataCancelAllowanceCircuitGroth16,
+    CalldataOfferAcceptanceCircuitGroth16,
+    CalldataOfferFinalizationCircuitGroth16,
 } from "../generated-types/zkit";
 import { processPoseidonEncryption } from "../src";
 import { encryptMessage } from "../src/jub/jub";
@@ -21,6 +25,8 @@ import {
     ConfidentialApproveCircuitGroth16Verifier__factory,
     ConfidentialTransferFromCircuitGroth16Verifier__factory,
     CancelAllowanceCircuitGroth16Verifier__factory,
+    OfferAcceptanceCircuitGroth16Verifier__factory,
+    OfferFinalizationCircuitGroth16Verifier__factory,
 } from "../typechain-types/factories/contracts/verifiers";
 import {
     deployLibrary,
@@ -44,6 +50,8 @@ describe("ZexERC - Confidential Allowance", () => {
     let confidentialApproveCircuit: ConfidentialApproveCircuit;
     let confidentialTransferFromCircuit: ConfidentialTransferFromCircuit;
     let cancelAllowanceCircuit: CancelAllowanceCircuit;
+    let offerAcceptanceCircuit: OfferAcceptanceCircuit;
+    let offerFinalizationCircuit: OfferFinalizationCircuit;
 
     const deployFixture = async () => {
         signers = await ethers.getSigners();
@@ -68,6 +76,13 @@ describe("ZexERC - Confidential Allowance", () => {
         const cancelAllowanceVerifier = await new CancelAllowanceCircuitGroth16Verifier__factory(owner).deploy();
         await cancelAllowanceVerifier.waitForDeployment();
 
+        // Deploy new ZEX swap verifiers
+        const offerAcceptanceVerifier = await new OfferAcceptanceCircuitGroth16Verifier__factory(owner).deploy();
+        await offerAcceptanceVerifier.waitForDeployment();
+
+        const offerFinalizationVerifier = await new OfferFinalizationCircuitGroth16Verifier__factory(owner).deploy();
+        await offerFinalizationVerifier.waitForDeployment();
+
         // Deploy ZexERC
         const zexERCFactory = new ZexERC__factory({
             "contracts/libraries/BabyJubJub.sol:BabyJubJub": babyJubJub,
@@ -88,6 +103,8 @@ describe("ZexERC - Confidential Allowance", () => {
             confidentialApproveVerifier: confidentialApproveVerifier.target,
             confidentialTransferFromVerifier: confidentialTransferFromVerifier.target,
             cancelAllowanceVerifier: cancelAllowanceVerifier.target,
+            offerAcceptanceVerifier: offerAcceptanceVerifier.target,
+            offerFinalizationVerifier: offerFinalizationVerifier.target,
         });
 
         await zexERC_.waitForDeployment();
@@ -100,6 +117,8 @@ describe("ZexERC - Confidential Allowance", () => {
         confidentialApproveCircuit = await zkit.getCircuit("ConfidentialApproveCircuit") as unknown as ConfidentialApproveCircuit;
         confidentialTransferFromCircuit = await zkit.getCircuit("ConfidentialTransferFromCircuit") as unknown as ConfidentialTransferFromCircuit;
         cancelAllowanceCircuit = await zkit.getCircuit("CancelAllowanceCircuit") as unknown as CancelAllowanceCircuit;
+        offerAcceptanceCircuit = await zkit.getCircuit("OfferAcceptanceCircuit") as unknown as OfferAcceptanceCircuit;
+        offerFinalizationCircuit = await zkit.getCircuit("OfferFinalizationCircuit") as unknown as OfferFinalizationCircuit;
     };
 
     before(async () => {
@@ -338,6 +357,111 @@ describe("ZexERC - Confidential Allowance", () => {
             await expect(cancelAllowanceCircuit).to.verifyProof(proof);
 
             console.log("✓ Cancel Allowance proof generated and verified locally");
+        });
+    });
+
+    describe("Offer Acceptance Circuit", () => {
+        it("should generate valid proof for offer acceptance", async () => {
+            const acceptor = users[2];
+            const initiator = users[1];
+            const amountToBuy = 500n;
+            const maxAmountToSell = 1000n;
+            const rate = ethers.parseEther("1");
+
+            // Encrypt the amount for initiator (so they can decrypt it during finalization)
+            const { cipher: encryptedAmount, random: encryptionRandom } =
+                encryptMessage(initiator.publicKey, amountToBuy);
+
+            const input = {
+                AcceptorPrivateKey: acceptor.formattedPrivateKey,
+                AmountToBuy: amountToBuy,
+                EncryptionRandom: encryptionRandom,
+                AcceptorPublicKey: acceptor.publicKey,
+                InitiatorPublicKey: initiator.publicKey,
+                MaxAmountToSell: maxAmountToSell,
+                Rate: rate,
+                AmountToBuyC1: encryptedAmount[0],
+                AmountToBuyC2: encryptedAmount[1],
+            };
+
+            // Generate proof
+            const proof = await offerAcceptanceCircuit.generateProof(input);
+
+            // Verify the proof locally
+            await expect(offerAcceptanceCircuit).to.verifyProof(proof);
+
+            console.log("✓ Offer Acceptance proof generated and verified locally");
+        });
+
+        it("should reject proof when amount exceeds maxAmountToSell", async () => {
+            const acceptor = users[2];
+            const initiator = users[1];
+            const amountToBuy = 1500n; // Exceeds maxAmountToSell
+            const maxAmountToSell = 1000n;
+            const rate = ethers.parseEther("1");
+
+            const { cipher: encryptedAmount, random: encryptionRandom } =
+                encryptMessage(initiator.publicKey, amountToBuy);
+
+            const input = {
+                AcceptorPrivateKey: acceptor.formattedPrivateKey,
+                AmountToBuy: amountToBuy,
+                EncryptionRandom: encryptionRandom,
+                AcceptorPublicKey: acceptor.publicKey,
+                InitiatorPublicKey: initiator.publicKey,
+                MaxAmountToSell: maxAmountToSell,
+                Rate: rate,
+                AmountToBuyC1: encryptedAmount[0],
+                AmountToBuyC2: encryptedAmount[1],
+            };
+
+            // Proof generation should fail due to constraint violation
+            try {
+                await offerAcceptanceCircuit.generateProof(input);
+                expect.fail("Should have thrown an error");
+            } catch (e) {
+                console.log("✓ Correctly rejected proof for excessive amount");
+            }
+        });
+    });
+
+    describe("Offer Finalization Circuit", () => {
+        it("should generate valid proof for offer finalization", async () => {
+            const initiator = users[1];
+            const acceptor = users[2];
+            const amountToBuy = 500n;
+            const sellAmount = 500n; // Same as amountToBuy
+            const rate = ethers.parseEther("1");
+
+            // Encrypt amountToBuy for initiator (simulating what acceptor sent)
+            const { cipher: amountToBuyEncrypted } =
+                encryptMessage(initiator.publicKey, amountToBuy);
+
+            // Encrypt sellAmount for acceptor
+            const { cipher: sellAmountEncrypted, random: sellEncryptionRandom } =
+                encryptMessage(acceptor.publicKey, sellAmount);
+
+            const input = {
+                InitiatorPrivateKey: initiator.formattedPrivateKey,
+                AmountToBuy: amountToBuy,
+                SellAmount: sellAmount,
+                SellEncryptionRandom: sellEncryptionRandom,
+                InitiatorPublicKey: initiator.publicKey,
+                AcceptorPublicKey: acceptor.publicKey,
+                Rate: rate,
+                AmountToBuyC1: amountToBuyEncrypted[0],
+                AmountToBuyC2: amountToBuyEncrypted[1],
+                SellAmountC1: sellAmountEncrypted[0],
+                SellAmountC2: sellAmountEncrypted[1],
+            };
+
+            // Generate proof
+            const proof = await offerFinalizationCircuit.generateProof(input);
+
+            // Verify the proof locally
+            await expect(offerFinalizationCircuit).to.verifyProof(proof);
+
+            console.log("✓ Offer Finalization proof generated and verified locally");
         });
     });
 
