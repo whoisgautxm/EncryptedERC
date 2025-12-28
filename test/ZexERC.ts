@@ -466,14 +466,26 @@ describe("ZexERC - Confidential Allowance", () => {
     });
 
     describe("Swap Marketplace", () => {
+        const initiatorIndex = 1;
+        const acceptorIndex = 2;
+        const maxAmountToSell = 1000n;
+        const amountToBuy = 500n;
+        const rate = ethers.parseEther("1"); // 1e18 = 1:1 rate
+
+        // Store encrypted data for use across tests
+        let encryptedAmountToBuy: { c1: bigint[]; c2: bigint[] };
+        let encryptionRandom: bigint;
+
         it("should create an offer", async () => {
-            const initiator = users[1];
+            const initiator = users[initiatorIndex];
 
             const tx = await zexERC.connect(initiator.signer).initiateOffer(
                 ethers.ZeroAddress, // assetBuy
                 ethers.ZeroAddress, // assetSell (this contract)
-                ethers.parseEther("1"), // rate
-                1000n, // maxAmountToSell
+                rate,
+                maxAmountToSell,
+                0n, // minAmountToSell
+                0n, // expiresAt (0 = no expiry)
                 "0x", // approveData
             );
 
@@ -481,32 +493,110 @@ describe("ZexERC - Confidential Allowance", () => {
 
             const offer = await zexERC.getOffer(0);
             expect(offer.initiator).to.equal(initiator.signer.address);
-            expect(offer.rate).to.equal(ethers.parseEther("1"));
-            expect(offer.maxAmountToSell).to.equal(1000n);
+            expect(offer.rate).to.equal(rate);
+            expect(offer.maxAmountToSell).to.equal(maxAmountToSell);
         });
 
-        it("should accept an offer", async () => {
-            const acceptor = users[2];
+        it("should accept an offer with real ZK proof", async () => {
+            const acceptor = users[acceptorIndex];
+            const initiator = users[initiatorIndex];
+
+            // Encrypt amountToBuy for initiator (so initiator can decrypt)
+            const { cipher: encryptedAmount, random } =
+                encryptMessage(initiator.publicKey, amountToBuy);
+
+            encryptedAmountToBuy = {
+                c1: [encryptedAmount[0][0], encryptedAmount[0][1]],
+                c2: [encryptedAmount[1][0], encryptedAmount[1][1]]
+            };
+            encryptionRandom = random;
+
+            // Generate OfferAcceptance proof
+            const input = {
+                AcceptorPrivateKey: acceptor.formattedPrivateKey,
+                AmountToBuy: amountToBuy,
+                EncryptionRandom: encryptionRandom,
+                AcceptorPublicKey: acceptor.publicKey,
+                InitiatorPublicKey: initiator.publicKey,
+                MaxAmountToSell: maxAmountToSell,
+                Rate: rate,
+                AmountToBuyC1: encryptedAmount[0],
+                AmountToBuyC2: encryptedAmount[1],
+            };
+
+            const proof = await offerAcceptanceCircuit.generateProof(input);
+            const calldata = await offerAcceptanceCircuit.generateCalldata(proof);
+
+            // Encode proof for contract
+            const proofData = ethers.AbiCoder.defaultAbiCoder().encode(
+                ["tuple(tuple(uint256[2] a, uint256[2][2] b, uint256[2] c) proofPoints, uint256[10] publicSignals)"],
+                [{
+                    proofPoints: calldata.proofPoints,
+                    publicSignals: calldata.publicSignals
+                }]
+            );
 
             const tx = await zexERC.connect(acceptor.signer).acceptOffer(
                 0, // offerId
-                "0x", // approveData
-                "0x", // proofData
+                "0x", // approveData (not using for this test)
+                proofData,
             );
 
             await tx.wait();
 
             const offer = await zexERC.getOffer(0);
             expect(offer.acceptor).to.equal(acceptor.signer.address);
+
+            console.log("✓ Offer accepted with real ZK proof");
         });
 
-        it("should finalize a swap", async () => {
-            const initiator = users[1];
+        it("should finalize a swap with real ZK proof", async () => {
+            const initiator = users[initiatorIndex];
+            const acceptor = users[acceptorIndex];
+
+            // With rate = 1e18 (1:1), sellAmount = amountToBuy * 1e18 / rate = amountToBuy
+            const sellAmount = amountToBuy;
+
+            // IMPORTANT: Use the SAME encrypted amountToBuy that was stored during acceptance
+            // The contract stores the commitment and checks it matches in finalization
+            // We stored encryptedAmountToBuy during the accept test
+
+            // Encrypt sellAmount for acceptor
+            const { cipher: sellAmountEncrypted, random: sellEncryptionRandom } =
+                encryptMessage(acceptor.publicKey, sellAmount);
+
+            const input = {
+                InitiatorPrivateKey: initiator.formattedPrivateKey,
+                AmountToBuy: amountToBuy,
+                SellAmount: sellAmount,
+                SellEncryptionRandom: sellEncryptionRandom,
+                InitiatorPublicKey: initiator.publicKey,
+                AcceptorPublicKey: acceptor.publicKey,
+                Rate: rate,
+                // Use the stored encrypted amount from acceptance (must match what's in the offer)
+                AmountToBuyC1: encryptedAmountToBuy.c1,
+                AmountToBuyC2: encryptedAmountToBuy.c2,
+                SellAmountC1: sellAmountEncrypted[0],
+                SellAmountC2: sellAmountEncrypted[1],
+            };
+
+            // Generate proof
+            const proof = await offerFinalizationCircuit.generateProof(input);
+            const calldata = await offerFinalizationCircuit.generateCalldata(proof);
+
+            // Encode proof for contract
+            const proofData = ethers.AbiCoder.defaultAbiCoder().encode(
+                ["tuple(tuple(uint256[2] a, uint256[2][2] b, uint256[2] c) proofPoints, uint256[13] publicSignals)"],
+                [{
+                    proofPoints: calldata.proofPoints,
+                    publicSignals: calldata.publicSignals
+                }]
+            );
 
             const tx = await zexERC.connect(initiator.signer).finalizeSwap(
                 0, // offerId
-                "0x", // transferFromData
-                "0x", // proofData
+                "0x", // transferFromData (no cross-contract transfers in this test)
+                proofData,
             );
 
             await tx.wait();
@@ -514,6 +604,8 @@ describe("ZexERC - Confidential Allowance", () => {
             // Offer should be deleted after finalization
             const offer = await zexERC.getOffer(0);
             expect(offer.initiator).to.equal(ethers.ZeroAddress);
+
+            console.log("✓ Swap finalized with real ZK proof");
         });
     });
 });

@@ -123,6 +123,11 @@ contract ZexERC is EncryptedERC {
     error OfferAlreadyAccepted();
     error NotOfferParticipant();
     error OfferNotAccepted();
+    error InsufficientInitiatorAllowance();  // C-03: Initiator must have sufficient allowance
+    error OfferExpired();                    // M-02: Offer has expired
+    error AmountBelowMinimum();              // M-03: Amount is below minimum
+    error ProofRequired();                   // M-05: Finalization proof is required
+    error InternalCallOnly();                // C-02: For internal cross-contract calls
     
     ///////////////////////////////////////////////////
     ///                   Constructor               ///
@@ -567,6 +572,8 @@ contract ZexERC is EncryptedERC {
      * @param assetSell Token address to sell (ZexERC contract) 
      * @param rate Exchange rate - how much assetBuy per 1 assetSell (scaled by 1e18)
      * @param maxAmountToSell Maximum amount of assetSell to sell
+     * @param minAmountToSell Minimum amount of assetSell (prevents griefing)
+     * @param expiresAt Timestamp when offer expires (0 = no expiry)
      * @param approveData Encoded confidential approval data for assetSell
      *        Format: (address spender, bytes amountEncryptionData, bytes amountCommitmentData, bytes proofData)
      * @return offerId The ID of the created offer
@@ -576,11 +583,14 @@ contract ZexERC is EncryptedERC {
         address assetSell,
         uint256 rate,
         uint256 maxAmountToSell,
+        uint256 minAmountToSell,
+        uint256 expiresAt,
         bytes calldata approveData
     ) external onlyIfAuditorSet returns (uint256 offerId) {
         if (!registrar.isUserRegistered(msg.sender)) revert UserNotRegistered();
         if (rate == 0) revert InvalidRate();
         if (maxAmountToSell == 0) revert InvalidAmount();
+        if (minAmountToSell > maxAmountToSell) revert InvalidAmount();
         
         offerId = nextOfferId++;
         
@@ -591,8 +601,11 @@ contract ZexERC is EncryptedERC {
             assetSell: assetSell,
             rate: rate,
             maxAmountToSell: maxAmountToSell,
-            amountToBuyEncryptionData: approveData, // Store initiator's approval data
-            amountToBuyCommitmentData: ""
+            minAmountToSell: minAmountToSell,
+            expiresAt: expiresAt,
+            amountToBuyEncryptionData: "",
+            amountToBuyCommitmentData: "",
+            initiatorApproveData: approveData  // M-04: Preserve original approval data
         });
         
         emit OfferCreated(offerId, msg.sender, assetBuy, assetSell, rate, maxAmountToSell);
@@ -614,6 +627,30 @@ contract ZexERC is EncryptedERC {
         if (offer.initiator == address(0)) revert OfferNotFound();
         if (offer.acceptor != address(0)) revert OfferAlreadyAccepted();
         if (!registrar.isUserRegistered(msg.sender)) revert UserNotRegistered();
+        
+        // M-02: Check if offer has expired
+        if (offer.expiresAt != 0 && block.timestamp > offer.expiresAt) {
+            revert OfferExpired();
+        }
+        
+        // C-03: Verify initiator has sufficient public allowance for the swap
+        // The initiator must have approved this contract for at least maxAmountToSell
+        if (offer.assetSell != address(0)) {
+            (
+                ,  // encryptedAmount
+                ,  // amountPCT
+                bool isPublic,
+                uint256 publicAmount,
+                // nonce
+            ) = IZexERC(offer.assetSell).getAllowance(
+                offer.initiator,
+                address(this),
+                0
+            );
+            if (!isPublic || publicAmount < offer.maxAmountToSell) {
+                revert InsufficientInitiatorAllowance();
+            }
+        }
         
         // Decode and verify offer acceptance proof
         OfferAcceptanceProof memory proof = abi.decode(proofData, (OfferAcceptanceProof));
@@ -684,8 +721,7 @@ contract ZexERC is EncryptedERC {
      *      2. Acceptor approved initiator for assetBuy during acceptOffer  
      *      3. Now we execute:
      *         - Verify finalization proof
-     *         - Acceptor transfers assetSell from initiator to themselves
-     *         - Initiator transfers assetBuy from acceptor to themselves
+     *         - Execute cross-token transfers via publicConfidentialTransferFrom
      */
     function finalizeSwap(
         uint256 offerId,
@@ -699,8 +735,11 @@ contract ZexERC is EncryptedERC {
             revert NotOfferParticipant();
         }
         
-        // Verify finalization proof if provided
-        if (proofData.length > 0) {
+        // M-05: Finalization proof is required
+        if (proofData.length == 0) revert ProofRequired();
+        
+        // Verify finalization proof
+        {
             OfferFinalizationProof memory proof = abi.decode(proofData, (OfferFinalizationProof));
             
             // Validate initiator's public key matches proof [0-1]
@@ -752,7 +791,8 @@ contract ZexERC is EncryptedERC {
         delete offers[offerId];
         
         // If no transfer data provided, just finalize without cross-contract calls
-        // This is useful for testing or when transfers are handled separately
+        // Note: For cross-contract transfers, the caller must pre-approve this contract
+        // and provide proper transfer data. See C-02 in audit report for details.
         if (transferFromData.length == 0) {
             emit SwapFinalized(offerId);
             return;
@@ -764,40 +804,44 @@ contract ZexERC is EncryptedERC {
             bytes memory acceptorToInitiatorData   // assetBuy: acceptor -> initiator
         ) = abi.decode(transferFromData, (bytes, bytes));
         
-        // Execute leg 1: Acceptor receives assetSell from initiator's allowance
-        // The acceptor calls confidentialTransferFrom on assetSell contract
+        // C-02 Fix: Use publicConfidentialTransferFrom since initiator approved THIS contract
+        // The initiator used publicConfidentialApprove with this contract as spender,
+        // so we (the ZEX contract) can call publicConfidentialTransferFrom to send to acceptor
+        
+        // Execute leg 1: Transfer assetSell from initiator's public allowance to acceptor
         if (initiatorToAcceptorData.length > 0 && offer.assetSell != address(0)) {
             (
                 bytes memory amountEncData1,
                 bytes memory amountCommitData1,
-                bytes memory proofData1
+                // proofData1 unused for public transfers
             ) = abi.decode(initiatorToAcceptorData, (bytes, bytes, bytes));
             
-            // Call the assetSell contract to transfer from initiator to acceptor
-            IZexERC(offer.assetSell).confidentialTransferFrom(
-                offer.initiator,  // approver
-                offer.acceptor,   // spender (receives the tokens)
+            // Call publicConfidentialTransferFrom: this contract is the spender (msg.sender)
+            // transferring from initiator (approver) to acceptor (receiver)
+            IZexERC(offer.assetSell).publicConfidentialTransferFrom(
+                offer.initiator,  // approver (who made the public allowance)
+                offer.acceptor,   // receiver (gets the tokens)
                 amountEncData1,
                 amountCommitData1,
-                proofData1
+                ""  // No ZK proof needed for public transfers - amount is public
             );
         }
         
-        // Execute leg 2: Initiator receives assetBuy from acceptor's allowance
+        // Execute leg 2: Transfer assetBuy from acceptor's public allowance to initiator
         if (acceptorToInitiatorData.length > 0 && offer.assetBuy != address(0)) {
             (
                 bytes memory amountEncData2,
                 bytes memory amountCommitData2,
-                bytes memory proofData2
+                // proofData2 unused for public transfers
             ) = abi.decode(acceptorToInitiatorData, (bytes, bytes, bytes));
             
-            // Call the assetBuy contract to transfer from acceptor to initiator
-            IZexERC(offer.assetBuy).confidentialTransferFrom(
-                offer.acceptor,   // approver
-                offer.initiator,  // spender (receives the tokens)
+            // Call publicConfidentialTransferFrom: this contract is the spender
+            IZexERC(offer.assetBuy).publicConfidentialTransferFrom(
+                offer.acceptor,   // approver (who made the public allowance)
+                offer.initiator,  // receiver (gets the tokens)
                 amountEncData2,
                 amountCommitData2,
-                proofData2
+                ""  // No ZK proof needed for public transfers
             );
         }
         

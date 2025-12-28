@@ -65,10 +65,27 @@ template OfferFinalizationCircuit() {
     checkDecryption.valueC2[0] <== AmountToBuyC2[0];
     checkDecryption.valueC2[1] <== AmountToBuyC2[1];
     
-    // 4. Verify SellAmount equals AmountToBuy
-    //    Rate was already applied by acceptor: they computed amountToPay = amountToBuy * rate
-    //    So SellAmount (what initiator sells) = AmountToBuy (what acceptor pays in assetSell terms)
-    SellAmount === AmountToBuy;
+    // 4. Verify SellAmount with Rate enforcement
+    //    Formula: SellAmount * Rate = AmountToBuy * RATE_PRECISION
+    //    Where RATE_PRECISION = 1e18 (matches Solidity scaling)
+    //    This ensures: SellAmount = AmountToBuy * RATE_PRECISION / Rate
+    //    
+    //    Rate interpretation (scaled by 1e18):
+    //    - Rate = 1e18: 1:1 exchange (SellAmount = AmountToBuy)
+    //    - Rate = 2e18: 2 assetBuy per 1 assetSell (initiator gets 2x value)
+    //    - Rate = 5e17: 0.5 assetBuy per 1 assetSell
+    //
+    //    Note: Any rounding must be done off-chain before proof generation.
+    //    The circuit enforces exact equality.
+    var RATE_PRECISION = 1000000000000000000; // 1e18
+    
+    signal rateProduct;
+    rateProduct <== SellAmount * Rate;
+    
+    signal expectedProduct;
+    expectedProduct <== AmountToBuy * RATE_PRECISION;
+    
+    rateProduct === expectedProduct;
     
     // 5. Verify SellAmount is correctly encrypted for acceptor
     component checkSellEncryption = CheckReceiverValue();
@@ -80,10 +97,6 @@ template OfferFinalizationCircuit() {
     checkSellEncryption.receiverValueC1[1] <== SellAmountC1[1];
     checkSellEncryption.receiverValueC2[0] <== SellAmountC2[0];
     checkSellEncryption.receiverValueC2[1] <== SellAmountC2[1];
-    
-    // Rate is a public input - bound for consistency
-    signal rateCheck;
-    rateCheck <== Rate * 1;
 }
 
 component main { public [ 

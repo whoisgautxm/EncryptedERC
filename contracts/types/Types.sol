@@ -97,15 +97,18 @@ struct Metadata {
 }
 
 
-struct Offer{
+struct Offer {
     address initiator;
     address acceptor;
     address assetBuy;
     address assetSell;
     uint256 rate;
     uint256 maxAmountToSell;
+    uint256 minAmountToSell;          // M-03: Minimum amount to prevent griefing
+    uint256 expiresAt;                // M-02: Offer expiration timestamp (0 = no expiry)
     bytes amountToBuyEncryptionData;
     bytes amountToBuyCommitmentData;
+    bytes initiatorApproveData;       // M-04: Preserve original approval data
 }
 
 ///////////////////////////////////////////////////

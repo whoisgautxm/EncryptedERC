@@ -286,6 +286,8 @@ describe("ZexERC - End-to-End Swap", () => {
                 tokenA.target, // assetSell
                 RATE, // rate
                 MAX_AMOUNT_TO_SELL, // maxAmountToSell
+                0n, // minAmountToSell (no minimum for this test)
+                0n, // expiresAt (0 = no expiry)
                 "0x", // approveData (not using publicConfidentialApprove in this test)
             );
 
@@ -355,6 +357,8 @@ describe("ZexERC - End-to-End Swap", () => {
                 tokenA.target,
                 RATE,
                 MAX_AMOUNT_TO_SELL,
+                0n, // minAmountToSell
+                0n, // expiresAt
                 "0x",
             );
 
