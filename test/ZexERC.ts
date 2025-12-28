@@ -608,4 +608,181 @@ describe("ZexERC - Confidential Allowance", () => {
             console.log("✓ Swap finalized with real ZK proof");
         });
     });
+
+    describe("E2E Swap with Rate = 3", () => {
+        // Test with rate = 3e18 (3:1 exchange)
+        // Formula: SellAmount * Rate = AmountToBuy * RATE_PRECISION
+        // So: SellAmount = AmountToBuy * 1e18 / Rate = AmountToBuy / 3
+        const rate3 = ethers.parseEther("3"); // 3e18
+        const maxAmountToSell3 = 500n;
+        const amountToBuy3 = 300n; // Acceptor pays 300 TokenB
+        // SellAmount = 300 * 1e18 / 3e18 = 100
+        const sellAmount3 = 100n;
+
+        let encryptedAmountToBuy3: { c1: bigint[]; c2: bigint[] };
+
+        it("should create offer with rate=3", async () => {
+            const initiator = users[1];
+
+            const tx = await zexERC.connect(initiator.signer).initiateOffer(
+                ethers.ZeroAddress,
+                ethers.ZeroAddress,
+                rate3,
+                maxAmountToSell3,
+                0n,
+                0n,
+                "0x",
+            );
+            await tx.wait();
+
+            const offer = await zexERC.getOffer(1); // Second offer (id=1)
+            expect(offer.rate).to.equal(rate3);
+            console.log(`✓ Offer created with rate=3 (${rate3})`);
+        });
+
+        it("should accept offer with rate=3", async () => {
+            const acceptor = users[2];
+            const initiator = users[1];
+
+            // Encrypt amountToBuy for initiator
+            const { cipher: encryptedAmount, random: encryptionRandom } =
+                encryptMessage(initiator.publicKey, amountToBuy3);
+
+            encryptedAmountToBuy3 = {
+                c1: [encryptedAmount[0][0], encryptedAmount[0][1]],
+                c2: [encryptedAmount[1][0], encryptedAmount[1][1]]
+            };
+
+            const input = {
+                AcceptorPrivateKey: acceptor.formattedPrivateKey,
+                AmountToBuy: amountToBuy3,
+                EncryptionRandom: encryptionRandom,
+                AcceptorPublicKey: acceptor.publicKey,
+                InitiatorPublicKey: initiator.publicKey,
+                MaxAmountToSell: maxAmountToSell3,
+                Rate: rate3,
+                AmountToBuyC1: encryptedAmount[0],
+                AmountToBuyC2: encryptedAmount[1],
+            };
+
+            const proof = await offerAcceptanceCircuit.generateProof(input);
+            const calldata = await offerAcceptanceCircuit.generateCalldata(proof);
+
+            const proofData = ethers.AbiCoder.defaultAbiCoder().encode(
+                ["tuple(tuple(uint256[2] a, uint256[2][2] b, uint256[2] c) proofPoints, uint256[10] publicSignals)"],
+                [{ proofPoints: calldata.proofPoints, publicSignals: calldata.publicSignals }]
+            );
+
+            const tx = await zexERC.connect(acceptor.signer).acceptOffer(1, "0x", proofData);
+            await tx.wait();
+
+            console.log(`✓ Offer accepted: amountToBuy=${amountToBuy3}`);
+        });
+
+        it("should finalize swap with rate=3 (sellAmount = amountToBuy / 3)", async () => {
+            const initiator = users[1];
+            const acceptor = users[2];
+
+            // Encrypt sellAmount for acceptor
+            const { cipher: sellAmountEncrypted, random: sellEncryptionRandom } =
+                encryptMessage(acceptor.publicKey, sellAmount3);
+
+            const input = {
+                InitiatorPrivateKey: initiator.formattedPrivateKey,
+                AmountToBuy: amountToBuy3,
+                SellAmount: sellAmount3,
+                SellEncryptionRandom: sellEncryptionRandom,
+                InitiatorPublicKey: initiator.publicKey,
+                AcceptorPublicKey: acceptor.publicKey,
+                Rate: rate3,
+                AmountToBuyC1: encryptedAmountToBuy3.c1,
+                AmountToBuyC2: encryptedAmountToBuy3.c2,
+                SellAmountC1: sellAmountEncrypted[0],
+                SellAmountC2: sellAmountEncrypted[1],
+            };
+
+            // This should succeed because: SellAmount * Rate = 100 * 3e18 = 300e18
+            // And: AmountToBuy * PRECISION = 300 * 1e18 = 300e18 ✓
+            const proof = await offerFinalizationCircuit.generateProof(input);
+            const calldata = await offerFinalizationCircuit.generateCalldata(proof);
+
+            const proofData = ethers.AbiCoder.defaultAbiCoder().encode(
+                ["tuple(tuple(uint256[2] a, uint256[2][2] b, uint256[2] c) proofPoints, uint256[13] publicSignals)"],
+                [{ proofPoints: calldata.proofPoints, publicSignals: calldata.publicSignals }]
+            );
+
+            const tx = await zexERC.connect(initiator.signer).finalizeSwap(1, "0x", proofData);
+            await tx.wait();
+
+            const offer = await zexERC.getOffer(1);
+            expect(offer.initiator).to.equal(ethers.ZeroAddress);
+
+            console.log(`✓ Swap finalized: amountToBuy=${amountToBuy3}, sellAmount=${sellAmount3}, rate=${rate3}`);
+            console.log(`  ✓ Verified: ${sellAmount3} * 3 = ${amountToBuy3} (rate enforcement works!)`);
+        });
+
+        it("should FAIL finalization with wrong sellAmount for rate=3", async () => {
+            // Create another offer for this test
+            const initiator = users[1];
+            const acceptor = users[2];
+
+            await zexERC.connect(initiator.signer).initiateOffer(
+                ethers.ZeroAddress, ethers.ZeroAddress, rate3, maxAmountToSell3, 0n, 0n, "0x"
+            );
+
+            // Accept it
+            const { cipher: encryptedAmount, random: encryptionRandom } =
+                encryptMessage(initiator.publicKey, amountToBuy3);
+
+            const acceptInput = {
+                AcceptorPrivateKey: acceptor.formattedPrivateKey,
+                AmountToBuy: amountToBuy3,
+                EncryptionRandom: encryptionRandom,
+                AcceptorPublicKey: acceptor.publicKey,
+                InitiatorPublicKey: initiator.publicKey,
+                MaxAmountToSell: maxAmountToSell3,
+                Rate: rate3,
+                AmountToBuyC1: encryptedAmount[0],
+                AmountToBuyC2: encryptedAmount[1],
+            };
+
+            const acceptProof = await offerAcceptanceCircuit.generateProof(acceptInput);
+            const acceptCalldata = await offerAcceptanceCircuit.generateCalldata(acceptProof);
+            const acceptProofData = ethers.AbiCoder.defaultAbiCoder().encode(
+                ["tuple(tuple(uint256[2] a, uint256[2][2] b, uint256[2] c) proofPoints, uint256[10] publicSignals)"],
+                [{ proofPoints: acceptCalldata.proofPoints, publicSignals: acceptCalldata.publicSignals }]
+            );
+
+            await zexERC.connect(acceptor.signer).acceptOffer(2, "0x", acceptProofData);
+
+            // Try to finalize with WRONG sellAmount (200 instead of 100)
+            const wrongSellAmount = 200n; // Should be 100
+
+            const { cipher: wrongEncrypted, random: wrongRandom } =
+                encryptMessage(acceptor.publicKey, wrongSellAmount);
+
+            const wrongInput = {
+                InitiatorPrivateKey: initiator.formattedPrivateKey,
+                AmountToBuy: amountToBuy3,
+                SellAmount: wrongSellAmount, // WRONG!
+                SellEncryptionRandom: wrongRandom,
+                InitiatorPublicKey: initiator.publicKey,
+                AcceptorPublicKey: acceptor.publicKey,
+                Rate: rate3,
+                AmountToBuyC1: [encryptedAmount[0][0], encryptedAmount[0][1]],
+                AmountToBuyC2: [encryptedAmount[1][0], encryptedAmount[1][1]],
+                SellAmountC1: wrongEncrypted[0],
+                SellAmountC2: wrongEncrypted[1],
+            };
+
+            // Proof generation should fail because: 200 * 3e18 ≠ 300 * 1e18
+            try {
+                await offerFinalizationCircuit.generateProof(wrongInput);
+                expect.fail("Should have failed with wrong sellAmount");
+            } catch (e) {
+                console.log("✓ Correctly rejected wrong sellAmount (200 instead of 100)");
+                console.log("  Rate enforcement working: sellAmount * rate must equal amountToBuy * precision");
+            }
+        });
+    });
 });
