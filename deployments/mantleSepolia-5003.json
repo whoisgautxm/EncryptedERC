@@ -1,0 +1,26 @@
+{
+  "network": "mantleSepolia",
+  "chainId": 5003,
+  "deployer": "0x8aDBa8dB836284E8F3bf7e896Ed4Eaf4B785e6C4",
+  "timestamp": "2025-12-28T16:47:18.509Z",
+  "contracts": {
+    "babyJubJub": "0x15f669F7f1460761E253D4B497bb593DC1fd108E",
+    "registrationVerifier": "0xEF3c0F4d86EF5165d158476Acdba1C95aE52582e",
+    "mintVerifier": "0x72AABf4b40088e3dE9201C04Cdcd30c00C8c5D59",
+    "withdrawVerifier": "0x423269EE30F0C255b2EA78D81Ccce16ab69A6855",
+    "transferVerifier": "0x708681d4FA7609782913A04C4cD782C7F1dBaC84",
+    "burnVerifier": "0x2eB7fbf477f3f2E3d290A2479887C7F92A14c201",
+    "confidentialApproveVerifier": "0x995ffF3831017FABC0CBf1Af7AB262f9aa6F2aA3",
+    "confidentialTransferFromVerifier": "0x1538692f603D4580Db02195eFA265546cBdAAE3A",
+    "cancelAllowanceVerifier": "0xbf11d3448284F1966769FE59b7B64Aca2cd089D5",
+    "offerAcceptanceVerifier": "0x6D5984ed8e314c86fcb441E5F57535010e5c3d93",
+    "offerFinalizationVerifier": "0xAF91e7A090758DC8DDA965Ae99580a06844A9634",
+    "registrar": "0x925fB09b836aBfFE0c42b91A1D1B8d254e787fcb",
+    "diamondCutFacet": "0x91e4C00Ad89c08C743F65dA01875F4113A8C2B76",
+    "zexTokenFacet": "0x84Ffee464cf91aD3d392f6B754fdd051b961deff",
+    "zexAllowanceFacet": "0xbb73B46D756c6e7ede47F4F483d558f43Dc7073F",
+    "zexSwapFacet": "0xc6f536496c3167382725147c2c16262200A3CCc4",
+    "diamondInit": "0x45704a6CF0Da48DEe27A41D887A67EDF4fC8adc5",
+    "zexDiamond": "0x4caD62E2E3618C64B20c9a0636D129fE6eDDB591"
+  }
+}

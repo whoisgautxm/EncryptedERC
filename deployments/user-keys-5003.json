@@ -1,0 +1,23 @@
+{
+  "chainId": 5003,
+  "users": {
+    "0x8adba8db836284e8f3bf7e896ed4eaf4b785e6c4": {
+      "address": "0x8aDBa8dB836284E8F3bf7e896Ed4Eaf4B785e6C4",
+      "privateKey": "1aee63a63c8ea9459cca90761508c94ac828ca15a12505ceff9c81d6fdc0504a",
+      "formattedPrivateKey": "40a41dfb3c9b0e85368cf47f0a65639c5f8a124b2388b07f3cb3a58457517f2",
+      "publicKey": [
+        "205fbf88e5f22af875d283a23d6845003d3117f2bae4be6a59e0037bf44300da",
+        "c868ba24894d98493ba38a8a9284ca1bcfa7f6981ab15d778624d0fa40153c7"
+      ]
+    },
+    "0x0c43053e16c2df9aa94b650d0c714eb819428ec4": {
+      "address": "0x0C43053e16c2df9AA94b650d0c714eb819428Ec4",
+      "privateKey": "dc570eb3f19647d869e81da68f5f2ce703b59e42c9ac9549b791b888f0325e11",
+      "formattedPrivateKey": "48bb8ad1ccd71f0bd90213c174efdab3cea94ca7e66cdf3b6b5b252ecfa3d6c",
+      "publicKey": [
+        "2c3a59ec7659b3f220280baeea569fb37c15adb1f77e97de6b92e877d1fd8d75",
+        "2b20a073f3375ff91a537b475f724673c29ec56c047500d7066b1c1bdb0fbd37"
+      ]
+    }
+  }
+}
