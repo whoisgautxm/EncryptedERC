@@ -1,353 +1,374 @@
-<div  align="center">
+<div align="center">
 
-<img  src="images/banner.png">
+<img src="images/banner.png">
+
+# ZEX: Confidential Peer-to-Peer DEX
+
+**A Zero-Knowledge Decentralized Exchange with Fully Private Order Book Trading**
+
+[![Deployed on Mantle](https://img.shields.io/badge/Deployed-Mantle%20Sepolia-blue)](https://sepolia.mantlescan.xyz/)
+[![ZK Proofs](https://img.shields.io/badge/ZK-Groth16-purple)](https://docs.circom.io/)
+[![Diamond Standard](https://img.shields.io/badge/EIP-2535%20Diamond-orange)](https://eips.ethereum.org/EIPS/eip-2535)
+[![License](https://img.shields.io/badge/License-Ecosystem-green)](LICENSE.md)
 
 </div>
 
-[![Coverage](https://img.shields.io/badge/Coverage-97%25-brightgreen)](https://github.com/ava-labs/EncryptedERC/actions/workflows/ci.yml)
-[![Security Audit](https://img.shields.io/badge/Security%20Audit-Passed-green)](https://github.com/ava-labs/EncryptedERC/tree/main/audit)
-[![Documentation](https://img.shields.io/badge/docs-available-green)](https://docs.avacloud.io/encrypted-erc)
+---
 
-# Encrypted ERC-20 Protocol
+## 📖 What is ZEX?
 
-The Encrypted ERC-20 (eERC) standard, developed by [AvaCloud](https://avacloud.io), enables secure and confidential token transfers on Avalanche blockchains. Leveraging zk-SNARKs and partially homomorphic encryption, the eERC protocol offers robust privacy without requiring protocol-level modifications or off-chain intermediaries.
-AvaCloud API documentation can be found [here](https://docs.avacloud.io/encrypted-erc/getting-started/what-is-encrypted-erc)
+**ZEX (Zero-Knowledge Exchange)** is a trustless peer-to-peer decentralized exchange protocol that enables **confidential token swaps** using zero-knowledge proofs. Inspired by the research paper ["ZEX: Confidential Peer-to-Peer DEX"](ZEX_confidential_peer_to_peer_DEX.pdf), this implementation brings private order book trading to EVM blockchains.
 
-## Key features
+### 🔐 Core Innovation: Privacy-Preserving Swaps
 
-- **Confidential Transactions**: User balances and transaction amounts remain completely hidden, ensuring financial confidentiality.
+Unlike traditional DEXs where order amounts are visible to everyone, ZEX:
 
-- **Large Integers**: Efficiently handles large token amounts up to 251 bits (2^251), providing greater flexibility.
+1. **Hides transaction amounts** - Only the parties involved can see the actual values
+2. **Enforces exchange rates via ZK proofs** - Mathematical guarantees without revealing amounts
+3. **Supports encrypted balances** - User balances are stored encrypted on-chain
+4. **Maintains auditor compliance** - A designated auditor can decrypt transactions for regulatory purposes
 
-- **Client-Side Operations**: Users retain control, performing encryption, decryption, and zk-proof generation directly on their own devices.
+### How It Works
 
-- **Fully On-chain Nature**: Operates entirely on-chain without the need for relayers or off-chain actors.
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│                        ZEX SWAP FLOW                                       │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                            │
+│  1️⃣  ALICE creates offer:                                                  │
+│      "I'll sell Token A at rate 3:1 for Token B"                           │
+│      (rate is public, max amount is public)                                │
+│                                                                            │
+│  2️⃣  BOB accepts with ZK proof:                                            │
+│      - Encrypts amountToBuy with Alice's public key                        │
+│      - Proves: amountToBuy ≤ maxAmount × rate                              │
+│      - Does NOT reveal actual amount!                                      │
+│                                                                            │
+│  3️⃣  ALICE finalizes with ZK proof (RATE ENFORCEMENT):                     │
+│      - Proves: sellAmount × rate = amountToBuy                             │
+│      - Proves she decrypted Bob's commitment correctly                     │
+│      - Settlement happens with encrypted amounts                           │
+│                                                                            │
+│  ✅ RESULT: Swap completes, no one knows the amounts except parties        │
+└────────────────────────────────────────────────────────────────────────────┘
+```
 
+---
 
-- **Built-in Compliance**: Supports external and rotatable auditors, ensuring regulatory compliance.
+## 🏗️ Architecture
 
+### Why EIP-2535 Diamond Standard?
 
-- **Dual-Mode Operation**: Supports both creating new private tokens and converting existing ERC-20 tokens their private versions.
+The ZEX protocol is implemented using the **Diamond Pattern (EIP-2535)** for several critical reasons:
 
-- **Zero-Knowledge Proofs**: Uses efficient zk-SNARKs to validate statements without revealing sensitive information.
+| Challenge | Diamond Solution |
+|-----------|------------------|
+| **Contract Size Limit** | Solidity contracts have a 24KB deployment limit. ZEX's full functionality exceeds this. Diamonds split logic into facets. |
+| **Upgradeability** | Facets can be upgraded independently without migrating user data or redeploying the entire system. |
+| **Shared Storage** | All facets share a single storage slot (`AppStorage`), ensuring consistent state across functions. |
+| **Gas Efficiency** | Single proxy address = users interact with one contract. Storage is shared, not duplicated. |
+| **Modularity** | Token operations, allowances, and swaps are cleanly separated into focused facets. |
 
-- **Chain Agnostic**: Can be deployed on any EVM-compatible blockchain.
+### Diamond Structure
 
-- **(NEW) Encrypted Metadata**: Allows users to send arbitrary-length encrypted metadata along with transactions.
+```
+                    ┌─────────────────────────────┐
+                    │       ZexDiamond            │
+                    │   (EIP-2535 Proxy)          │
+                    │                             │
+                    │  fallback() → delegatecall  │
+                    └──────────────┬──────────────┘
+                                   │
+           ┌───────────────────────┼───────────────────────┐
+           │                       │                       │
+           ▼                       ▼                       ▼
+┌─────────────────────┐ ┌─────────────────────┐ ┌─────────────────────┐
+│   ZexTokenFacet     │ │  ZexAllowanceFacet  │ │    ZexSwapFacet     │
+├─────────────────────┤ ├─────────────────────┤ ├─────────────────────┤
+│ • name(), symbol()  │ │ • approve()         │ │ • initiateOffer()   │
+│ • decimals()        │ │ • getAllowance()    │ │ • acceptOffer()     │
+│ • privateMint()     │ │ • confidentialAppr  │ │ • finalizeSwap()    │
+│ • privateTransfer() │ │   ove()             │ │ • getOffer()        │
+│ • privateBurn()     │ │ • cancelAllowance() │ │                     │
+│ • balanceOf()       │ │ • transferFrom()    │ │                     │
+└─────────────────────┘ └─────────────────────┘ └─────────────────────┘
+           │                       │                       │
+           └───────────────────────┴───────────────────────┘
+                                   │
+                    ┌──────────────▼──────────────┐
+                    │       LibAppStorage         │
+                    │    (Shared Diamond State)   │
+                    ├─────────────────────────────┤
+                    │ • Token metadata            │
+                    │ • Encrypted balances        │
+                    │ • Encrypted allowances      │
+                    │ • Swap offers               │
+                    │ • Verifier references       │
+                    │ • Auditor public key        │
+                    └─────────────────────────────┘
+```
 
+### Contract Files
 
-## Architecture
+| Contract | Purpose |
+|----------|---------|
+| [`ZexDiamond.sol`](contracts/diamond/ZexDiamond.sol) | Main proxy contract, routes calls to facets |
+| [`LibDiamond.sol`](contracts/diamond/LibDiamond.sol) | Diamond cut logic, facet management |
+| [`LibAppStorage.sol`](contracts/diamond/LibAppStorage.sol) | Shared storage struct for all facets |
+| [`ZexTokenFacet.sol`](contracts/facets/ZexTokenFacet.sol) | Token operations (mint, burn, transfer) |
+| [`ZexAllowanceFacet.sol`](contracts/facets/ZexAllowanceFacet.sol) | Encrypted allowances and approvals |
+| [`ZexSwapFacet.sol`](contracts/facets/ZexSwapFacet.sol) | Order book and swap marketplace |
+| [`Registrar.sol`](contracts/Registrar.sol) | User registration with ZK proofs |
 
-The eERC protocol consists of several key components:
+---
 
-### Core Contracts
+## 🔮 Zero-Knowledge Circuits
 
-- **EncryptedERC** ([contracts/EncryptedERC.sol](contracts/EncryptedERC.sol)): The main contract that implements the privacy-preserving ERC-20 functionality. It handles:
+ZEX uses **10 ZK circuits** implemented in Circom, each serving a specific purpose:
 
-  - Private token operations (mint, burn, transfer)
-  - Privacy-preserving balance management
-  - Integration with other core components
+### Core Token Circuits
 
-- **Registrar**: Manages user registration and public key association.
+| Circuit | Public Signals | Purpose |
+|---------|----------------|---------|
+| [`registration.circom`](circom/registration.circom) | ChainID, PublicKey, Address | Prove ownership of private key without revealing it |
+| [`mint.circom`](circom/mint.circom) | Encrypted amount, Auditor encryption | Privately mint tokens with auditor visibility |
+| [`transfer.circom`](circom/transfer.circom) | Encrypted amounts for sender/receiver | Private token transfers |
+| [`withdraw.circom`](circom/withdraw.circom) | Amount, Balance proof | Convert private to public tokens |
+| [`burn.circom`](circom/burn.circom) | Amount, Balance proof | Destroy private tokens |
 
-  - Handles user registration
-  - Stores public keys
-  - Validates user identities
-  - Manages registration proofs
+### Allowance Circuits
 
-- **EncryptedUserBalances**: Handles encrypted balance storage and updates.
+| Circuit | Public Signals | Purpose |
+|---------|----------------|---------|
+| [`confidential_approve.circom`](circom/confidential_approve.circom) | Encrypted allowance | Approve spender with hidden amount |
+| [`confidential_transfer_from.circom`](circom/confidential_transfer_from.circom) | Encrypted transfer data | Execute approved transfer |
+| [`cancel_allowance.circom`](circom/cancel_allowance.circom) | Nullifier | Revoke an allowance |
 
-  - Stores encrypted balances
-  - Manages balance updates in encrypted manner
-  - Ensures balance privacy
-  - Handles encrypted balance verification
+### DEX Circuits (ZEX-Specific)
 
-- **TokenTracker**: Manages token registration and tracking.
+| Circuit | Public Signals | Purpose |
+|---------|----------------|---------|
+| [`offer_acceptance.circom`](circom/offer_acceptance.circom) | AcceptorPK, InitiatorPK, MaxAmount, Rate, EncryptedAmount | Accept swap offer with amount bounds validation |
+| [`offer_finalization.circom`](circom/offer_finalization.circom) | InitiatorPK, AcceptorPK, Rate, Commitments, EncryptedSellAmount | **Rate enforcement**: proves `sellAmount × rate = amountToBuy` |
 
-  - Tracks registered tokens
-  - Manages token metadata
-  - Handles token blacklisting
+### Critical: Rate Enforcement Circuit
 
-- **AuditorManager**: Provides auditor-related functionality for compliance.
-  - Manages auditor permissions
-  - Stores auditor address with it's public key
+The `offer_finalization.circom` circuit is the **heart of ZEX's trustless guarantees**:
 
-### Cryptographic Components
+```circom
+// This constraint enforces: sellAmount * rate = amountToBuy
+// Without revealing either sellAmount or amountToBuy!
+component rateEnforce = IsZero();
+rateEnforce.in <== SellAmount * Rate - AmountToBuy;
+signal rateValid <== rateEnforce.out;
+rateValid === 1;
+```
 
-- **BabyJubJub**: Library for elliptic curve operations on the BabyJubJub curve.
+This means:
+- If Alice offers rate 3:1 and Bob commits to pay 300 tokens
+- Alice MUST prove she's selling exactly 100 tokens (300 ÷ 3)
+- The circuit mathematically enforces this without revealing 100 or 300
 
-- **Zero-Knowledge Circuits**: Circom-based circuits for proof generation and verification.
+---
 
-  - **Registration Circuit**: Validates user registration
-  - **Mint Circuit**: Verifies minting operations
-  - **Transfer Circuit**: Validates private transfers
-  - **Withdraw Circuit**: Verifies withdrawal operations
+## 📊 Deployed Contracts (Mantle Sepolia)
 
-### Operation Modes
+| Contract | Address |
+|----------|---------|
+| 💎 **ZexDiamond** | [`0x4caD62E2E3618C64B20c9a0636D129fE6eDDB591`](https://sepolia.mantlescan.xyz/address/0x4caD62E2E3618C64B20c9a0636D129fE6eDDB591) |
+| 📝 **Registrar** | [`0x925fB09b836aBfFE0c42b91A1D1B8d254e787fcb`](https://sepolia.mantlescan.xyz/address/0x925fB09b836aBfFE0c42b91A1D1B8d254e787fcb) |
+| 🔐 **OfferAcceptanceVerifier** | [`0x6D5984ed8e314c86fcb441E5F57535010e5c3d93`](https://sepolia.mantlescan.xyz/address/0x6D5984ed8e314c86fcb441E5F57535010e5c3d93) |
+| ✅ **OfferFinalizationVerifier** | [`0xAF91e7A090758DC8DDA965Ae99580a06844A9634`](https://sepolia.mantlescan.xyz/address/0xAF91e7A090758DC8DDA965Ae99580a06844A9634) |
 
-1. **Standalone Mode**:
+> **All 17 contracts verified on Mantlescan** ✅
 
-   - Creates entirely new private ERC-20 (eERC) tokens
-   - Relies on minting and burning to manage token supply
-   - Keeps total supply private all the time, offering better privacy compared to converter mode
+---
 
-2. **Converter Mode**:
-   - Wraps existing ERC20 tokens to eERC tokens
-   - Relies on deposits and withdrawals to manage token supply
-   - Maintains compatibility with original tokens
+## 🧪 End-to-End Testing
 
-## File structure
+Since this is a hackathon project, there is no frontend. Instead, we provide comprehensive **E2E test scripts** that demonstrate the full protocol functionality.
 
-- [contracts](#contracts) Smart contract source files
+### Available Scripts
 
-  - `EncryptedERC.sol` - Main contract implementation
+| Script | Purpose |
+|--------|---------|
+| [`deploy-mantle.ts`](scripts/deploy-mantle.ts) | Deploy all 17 contracts to Mantle L2 |
+| [`verify-contracts.ts`](scripts/verify-contracts.ts) | Verify contracts on block explorer |
+| [`test-live.ts`](scripts/test-live.ts) | Basic integration tests on deployed contracts |
+| [`test-full-swap.ts`](scripts/test-full-swap.ts) | **Complete two-user swap E2E test** |
 
-  - `Registrar.sol` - User registration management
+### Running the Full Swap Test
 
-  - `EncryptedUserBalances.sol` - Encrypted balance handling
+```bash
+# 1. Set up environment
+cp .env.example .env
+# Add PRIVATE_KEY and PRIVATE_KEY_2 (two wallets for two users)
 
-  - `tokens/TokenTracker.sol` - Token registration and tracking
+# 2. Deploy to Mantle Sepolia
+npx hardhat run scripts/deploy-mantle.ts --network mantleSepolia
 
-  - `auditor/AuditorManager.sol` - Auditor functionality
+# 3. Run full two-user swap test
+npx hardhat run scripts/test-full-swap.ts --network mantleSepolia
+```
 
-  - `libraries/BabyJubJub.sol` - Cryptographic operations
+### What the E2E Test Does
 
-  - `types/Types.sol` - Data structures and types
+```
+╔════════════════════════════════════════════════════════════════╗
+║       ZEX Diamond Full Two-User Swap E2E Test                  ║
+╚════════════════════════════════════════════════════════════════╝
 
-  - `interfaces/` - Contract interfaces
+📋 STEP 1: Setup Auditor Key
+   ✓ Auditor key set
 
-  - `verifiers/` - Zero-knowledge proof verifiers
+📋 STEP 2: Register Both Users
+   ✓ Alice registered with ZK proof
+   ✓ Bob registered with ZK proof
 
-- [scripts](#scripts) Utility and deployment scripts
+📋 STEP 3: Alice Creates Swap Offer
+   Rate: 3:1 (sell 1 Token A, receive 3 Token B)
+   ✓ Offer created
 
-- [src](#src) Encryption utilities for TypeScript
+📋 STEP 4: Bob Accepts the Offer (ZK Proof)
+   🔒 Encrypting amount with Alice's public key
+   🔐 Generating ZK proof for offer acceptance
+   ✓ Offer accepted
 
-- [tests](#tests) Test scripts and helpers
+📋 STEP 5: Alice Finalizes the Swap (ZK Proof + Rate Enforcement)
+   📊 What the ZK proof proves:
+      • sellAmount × rate = amountToBuy
+      • 100 × 3 = 300 ✓
+   ✓ Swap finalized
 
-- [circom](#circom) Zero-knowledge proof circuits
+✅ All ZK proofs verified on-chain!
+```
 
-## Getting Started
+---
+
+## 🛠️ Development Setup
 
 ### Prerequisites
 
-You need following dependencies for setup:
-
-- `NodeJS >= v22.x`
-
-- `Circom >= 2.1.9`
+- Node.js ≥ v22.x
+- Circom ≥ 2.1.9
 
 ### Installation
 
-1. Clone the repo
-
-```sh
+```bash
+# Clone the repo
 git clone https://github.com/ava-labs/EncryptedERC.git
-```
+cd EncryptedERC
 
-2. Install NPM packages
-
-```sh
+# Install dependencies
 npm install
-```
 
-3. Compile the contracts
-
-```sh
+# Compile contracts
 npx hardhat compile
-```
 
-4. Compile Circuits
+# Compile ZK circuits (takes ~5 minutes)
+npx hardhat zkit make --force
+npx hardhat zkit verifiers
 
-```sh
-npx hardhat zkit make --force # compiles circuits
-npx hardhat zkit verifiers    # generates verifiers
-```
-
-## Deployment (Local)
-
-### Standalone
-
-The Standalone version lets users create entirely new private ERC-20 tokens with built-in privacy, supporting confidential minting and burning.
-
-1. Start the local node
-
-```sh
-npx hardhat node
-```
-
-2. Deploy the contract
-
-```sh
-npx hardhat run scripts/deploy-standalone.ts --network localhost
-```
-
-Refer to the [scripts/deploy-standalone.ts](scripts/deploy-standalone.ts) script for deployment examples.
-
-### Converter
-
-The Converter version adds privacy features to existing ERC-20 tokens, enabling users to convert standard ERC-20 tokens to private ones and switch between public and private states through deposit and withdrawal functions.
-
-1. Start the local node
-
-```sh
-npx hardhat node
-```
-
-2. Deploy the contract
-
-```sh
-npx hardhat run scripts/deploy-converter.ts --network localhost
-```
-
-Refer to the [scripts/deploy-converter.ts](scripts/deploy-converter.ts) script for deployment examples.
-
-## Architecture Overview
-
-```mermaid
----
-config:
-  theme: neo-dark
----
-  flowchart LR
-  subgraph subGraph0["eERC SDK"]
-          KeyMgmt["Key Generation"]
-          ProofGen["Proof Generation"]
-          TxBuild["Transaction Building"]
-          BalanceEnc["Balance Encryption/Decryption"]
-          SDK["Client SDK"]
-    end
-  subgraph subGraph1["Core Layer"]
-          EERC["EncryptedERC"]
-          StoreKeys["Store Public Keys"]
-          ManageBalances["Manage Encrypted Balances"]
-          HandleAudits["Handle Auditors"]
-          PrivateOps["Private Token Operations"]
-          VerifyProof["Verify ZK Proof"]
-    end
-  subgraph subGraph1["Contract Layer"]
-          Registrar["Registrar"]
-          EncryptedUserBalances["EncryptedUserBalances"]
-          AuditorManager["AuditorManager"]
-          ZKVerifiers["ZK Verifiers"]
-          RegVerifier["Registration Verifier"]
-          TransVerifier["Transfer Verifier"]
-          MintVerifier["Mint Verifier"]
-          WithdrawVerifier["Withdraw Verifier"]
-    end
-      User["User"] -- All Client Operations --> SDK
-      SDK --> KeyMgmt & ProofGen & TxBuild & BalanceEnc
-      subGraph0 -- Submit Tx + ZK Proof --> EERC
-      EERC --> StoreKeys & ManageBalances & HandleAudits & PrivateOps & VerifyProof
-      StoreKeys --> Registrar
-      ManageBalances --> EncryptedUserBalances
-      HandleAudits --> AuditorManager
-      VerifyProof --> ZKVerifiers
-      ZKVerifiers --> RegVerifier & TransVerifier & MintVerifier & WithdrawVerifier
-```
-
-## Run Tests/Coverage
-
-Contract tests:
-
-```sh
+# Run tests
 npx hardhat test
 ```
 
-Coverage report:
+### Environment Variables
 
-```sh
-npx hardhat coverage
+```bash
+# .env file
+PRIVATE_KEY=your_deployer_private_key
+PRIVATE_KEY_2=second_wallet_for_e2e_tests
+MANTLE_TESTNET_RPC_URL=https://rpc.sepolia.mantle.xyz
+MANTLESCAN_API_KEY=your_mantlescan_api_key
 ```
 
-## 📊 Efficiency Overview
+---
 
-### ⛽ Avg. On-Chain Gas Costs (Avalanche C-Chain Mainnet)
+## 📐 Technical Deep Dive
 
-```sh
-······················································································································································································
-|  Solidity and Network Configuration                                                                                                                                                │
-·································································································|·················|···············|·················|································
-|  Solidity: 0.8.27                                                                              ·  Optim: true    ·  Runs: 200    ·  viaIR: false   ·     Block: 30,000,000 gas     │
-·································································································|·················|···············|·················|································
-|  Network: AVALANCHE                                                                            ·  L1: 0.14345 gwei               ·                 ·        16.36 usd/avax         │
-·································································································|·················|···············|·················|················|···············
-|  Contracts / Methods                                                                           ·  Min            ·  Max          ·  Avg            ·    calls       ·  usd (avg)   │
-·································································································|·················|···············|·················|················|···············
-|  EncryptedERC                                                                                  ·                                                                                   │
-·································································································|·················|···············|·················|················|···············
-|      deposit(uint256,address,uint256[7])                                                       ·         71,680  ·      841,771  ·        564,892  ·            16  ·           △  │
-·································································································|·················|···············|·················|················|···············
-|      privateBurn(((uint256[2],uint256[2][2],uint256[2]),uint256[32]),uint256[7])               ·        890,507  ·    1,227,920  ·      1,028,678  ·             4  ·           △  │
-·································································································|·················|···············|·················|················|···············
-|      privateMint(address,((uint256[2],uint256[2][2],uint256[2]),uint256[24]))                  ·        712,316  ·      760,624  ·        722,016  ·            10  ·           △  │
-·································································································|·················|···············|·················|················|···············
-|      setAuditorPublicKey(address)                                                              ·              -  ·            -  ·        103,851  ·             4  ·           △  │
-·································································································|·················|···············|·················|················|···············
-|      setTokenBlacklist(address,bool)                                                           ·              -  ·            -  ·         46,443  ·             1  ·           △  │
-·································································································|·················|···············|·················|················|···············
-|      transfer(address,uint256,((uint256[2],uint256[2][2],uint256[2]),uint256[32]),uint256[7])  ·        947,295  ·      947,331  ·        947,313  ·             4  ·           △  │
-·································································································|·················|···············|·················|················|···············
-|      withdraw(uint256,((uint256[2],uint256[2][2],uint256[2]),uint256[16]),uint256[7])          ·        775,186  ·      828,341  ·        796,263  ·             6  ·           △  │
-·································································································|·················|···············|·················|················|···············
-|  Registrar                                                                                     ·                                                                                   │
-·································································································|·················|···············|·················|················|···············
-|      register(((uint256[2],uint256[2][2],uint256[2]),uint256[5]))                              ·        322,114  ·      322,150  ·        322,143  ·            20  ·           △  │
-·································································································|·················|···············|·················|················|···············
-|  Deployments                                                                                                     ·                                 ·  % of limit    ·              │
-·································································································|·················|···············|·················|················|···············
-|  BabyJubJub                                                                                    ·              -  ·            -  ·        447,616  ·         1.5 %  ·           △  │
-·································································································|·················|···············|·················|················|···············
-|  EncryptedERC                                                                                  ·      3,704,671  ·    3,729,773  ·      3,717,222  ·        12.4 %  ·        0.01  │
-·································································································|·················|···············|·················|················|···············
-|  MintCircuitGroth16Verifier                                                                    ·              -  ·            -  ·      1,690,470  ·         5.6 %  ·           △  │
-·································································································|·················|···············|·················|················|···············
-|  Registrar                                                                                     ·              -  ·            -  ·        508,067  ·         1.7 %  ·           △  │
-·································································································|·················|···············|·················|················|···············
-|  RegistrationCircuitGroth16Verifier                                                            ·              -  ·            -  ·        810,848  ·         2.7 %  ·           △  │
-·································································································|·················|···············|·················|················|···············
-|  TransferCircuitGroth16Verifier                                                                ·              -  ·            -  ·      2,052,092  ·         6.8 %  ·           △  │
-·································································································|·················|···············|·················|················|···············
-|  WithdrawCircuitGroth16Verifier                                                                ·              -  ·            -  ·      1,319,158  ·         4.4 %  ·           △  │
-·································································································|·················|···············|·················|················|···············
-|  Key                                                                                                                                                                               │
-······················································································································································································
-|  △  Cost was non-zero but below the precision setting for the currency display                                                                                                     │
-······················································································································································································
+### Encryption Scheme
+
+ZEX uses **ElGamal encryption** on the **BabyJubJub curve**:
+
+- **Curve**: BabyJubJub (embedded in BN254, SNARK-friendly)
+- **Encryption**: Exponential ElGamal for additive homomorphism
+- **Key Format**: (x, y) curve points for public keys
+
+```solidity
+struct EGCT {
+    Point c1;  // ElGamal ciphertext component 1
+    Point c2;  // ElGamal ciphertext component 2
+}
 ```
 
-## Security Audits
+### Balance Storage
 
-1. **Circom Audit**
+Encrypted balances are stored as:
 
-   - Date: March 2025
-   - Scope: Circom circuits for various zero-knowledge proofs
-   - Report: [avacloud-eerc-circom-audit.pdf](audit/avacloud-eerc-circom-audit.pdf)
-
-2. **Gnark Audit**
-   - Date: March 2025
-   - Scope: Core protocol and Gnark circuits for zero-knowledge proofs
-   - Report: [avacloud-eerc-audit.pdf](audit/avacloud-eerc-audit.pdf)
-
-## Security Considerations
-
-- **Auditor Integration**: The protocol includes built-in auditor functionality for compliance.
-
-- **Blacklisting**: Supports optionalblacklisting for security purposes.
-
-### Notes
-
-For production deployments, set `isProd` to `true` in the deployment scripts to use the production verifiers. These verifiers use secure trusted setups from the [zkevm](https://github.com/iden3/snarkjs?tab=readme-ov-file#7-prepare-phase-2).
-
-Corresponding `zkey` and `verification_key.json` files are present in the `circuits/build` directory. After compiling circuits present in the `circuits` folder, and downloading the proper `.ptau` files, these can be verified using the `snarkjs` tool with the following command:
-
-```sh
-snarkjs zkey verify <circuit_name>.r1cs powersOfTau28_hez_final_<Size>.ptau <circuit_name>.zkey
+```solidity
+struct EncryptedBalance {
+    EGCT egct;           // Encrypted balance
+    uint256 nonce;       // Replay protection
+    uint256 txIndex;     // Transaction ordering
+}
 ```
 
-- For transfer/mint circuit => `powersOfTau28_hez_final_15.ptau`
-- For withdraw circuit => `powersOfTau28_hez_final_14.ptau`
-- For registration circuit => `powersOfTau28_hez_final_11.ptau`
+### Swap Offer Structure
 
-## License
+```solidity
+struct Offer {
+    address initiator;
+    address acceptor;
+    address assetBuy;
+    address assetSell;
+    uint256 rate;          // Public exchange rate
+    uint256 maxAmountToSell;
+    uint256 minAmountToSell;
+    uint256 expiresAt;
+    bytes amountToBuyEncryptionData;  // Encrypted by acceptor
+    bytes amountToBuyCommitmentData;
+    bytes initiatorApproveData;
+}
+```
 
-This project is licensed under the Ecosystem License - see the LICENSE file for details.
+---
+
+## 📚 Research Background
+
+This implementation is based on the research paper:
+
+> **"ZEX: Confidential Peer-to-Peer DEX"**
+> 
+> The paper introduces a novel approach to decentralized exchanges that:
+> - Maintains order privacy on a public blockchain
+> - Uses zero-knowledge proofs for rate enforcement
+> - Supports encrypted order matching
+> - Provides auditor compliance capabilities
+
+See the full paper: [ZEX_confidential_peer_to_peer_DEX.pdf](ZEX_confidential_peer_to_peer_DEX.pdf)
+
+---
+
+## 🔒 Security Considerations
+
+- **Auditor Integration**: Built-in auditor functionality for regulatory compliance
+- **Rate Enforcement**: Mathematically enforced via ZK circuits, not trusted parties
+- **Key Persistence**: User keys are stored in `deployments/user-keys-{chainId}.json` for test continuity
+- **Trusted Setup**: Production verifiers use secure trusted setups from zkEVM
+
+---
+
+## 📄 License
+
+This project is licensed under the Ecosystem License - see [LICENSE.md](LICENSE.md) for details.
+
+---
+
+<div align="center">
+
+**Built for Hackathon** 🏆
+
+*Bringing private trading to public blockchains*
+
+</div>
